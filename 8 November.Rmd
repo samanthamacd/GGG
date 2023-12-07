@@ -1,0 +1,169 @@
+---
+title: "Nov 8"
+output: html_document
+date: "2023-11-08"
+---
+
+Boosting and Bart 
+
+# Ensemble Learning 
+Bagging - tree on each bootstrapepd copy, parallel 
+**Boosting - sequential**  
+  - take whole model and build a tree; look at the difference 
+    - new tree that looks at the residuals; builds a tree 
+  - continue with that and tune so the model isn't overfit: tuning the number of trees is vital 
+  
+# Boosting Algorithm 
+  - fit 0 trees, residuals are the actual observations 
+  - however many boosted trees; fit a tree using x's and residuals using previous iteration 
+     - this means that the residuals are literally the response
+  - new preds are whatever they were up to this point + (some lambda) x residual; lambda is going to be relatively small; we want every tree to contribute  
+     - lambda = learning rate 
+  - new pred = new set of residuals = next iteration etc. etc. 
+  
+# Tuning 
+- if # of trees is too big, it will overfit; too small, underfit 
+- you don't want the trees to be particularly deep because boosting can easily overfit 
+- learning rate should stay small (lambda) 
+
+# Keep in Mind: 
+ - boosting updates sequentially; every update will be a better prediction than the previous 
+ - gradient of the loss function for non-quantitative response variable; all-encompassing form of boosting 
+ - BART = bayesian additive regression trees: fits the # of trees, optimized, then goes back to number one and adjusts based off of what the other trees' outcomes were 
+
+```{r}
+library(tidyverse)
+
+gggTest <- read_csv('test.csv')
+gggTrain <- read_csv('train.csv')
+
+gggrecipe <- recipe(type ~ ., gggTrain) %>%
+  update_role(id, new_role="id") %>%
+  step_mutate(type = as.factor(type), skip = TRUE) %>%
+  step_mutate(color = as.factor(color)) %>%
+  step_dummy(color) %>% # Turn color to factor then dummy encode color
+  step_range(all_numeric_predictors(), min=0, max=1) 
+
+boost_model <- boost_tree(tree_depth = tune(), 
+                          trees = tune(), 
+                          learn_rate = tune()) %>% 
+  set_engine("lightgbm") %>% 
+  set_mode("classification") 
+
+boost_wf <- workflow() %>%
+  add_recipe(gggrecipe) %>%
+  add_model(boost_model)
+
+boost_tuneGrid <- grid_regular(tree_depth(), 
+                               trees(), 
+                               learn_rate())
+
+folds <- vfold_cv(gggTrain, v = 5, repeats=1)
+
+CV_Boost_results <- boost_wf %>% tune_grid(resamples = folds, 
+            grid = boost_tuneGrid, 
+            metrics = metric_set(accuracy))
+
+bestBoostTune <- CV_Boost_results %>% 
+  select_best("accuracy") 
+
+final_boost_wf <- boost_wf %>%
+  finalize_workflow(bestBoostTune) %>%
+  fit(gggTrain)
+
+pred_Boost <- predict(final_boost_wf, new_data = gggTest, type = "class") %>%
+  bind_cols(., gggTest) %>%
+  rename(type = .pred_class) %>%
+  select(id, type)
+
+library(vroom)
+library(embed)
+library(themis)
+library(parsnip)
+vroom_write(pred_Boost, "GGGBoostPreds.csv", delim = ",")
+
+```
+
+Final Kaggle Submission: Use Naive Bayes 
+
+```{r}
+nb_model <- naive_Bayes(Laplace = tune(), smoothness = tune()) %>% 
+  set_mode("classification") %>% 
+  set_engine("naivebayes") 
+
+nb_workflow <- workflow() %>% 
+  add_recipe(gggrecipe) %>% 
+  add_model(nb_model) 
+
+tuneGrid <- grid_regular(Laplace(), 
+                         smoothness())
+
+folds <- vfold_cv(gggTrain, v = 5, repeats = 1)
+
+CVresults <- nb_workflow %>%
+  tune_grid(resamples = folds,
+            grid = tuneGrid,
+            metrics = metric_set(roc_auc))
+
+CVresults %>% collect_metrics() %>% filter(.metric=="accuracy") %>%
+ggplot(aes(x=hidden_units, y=mean)) + geom_line()
+
+bestTune <- CVresults %>%
+  select_best("roc_auc")
+
+#finalize workflow and fit it
+final_wf <- nb_workflow %>%
+  finalize_workflow(bestTune) %>%
+  fit(gggTrain)
+pred <- predict(final_wf, new_data = gggTest, type = "class") %>%
+  bind_cols(., gggTest) %>%
+  rename(type = .pred_class) %>%
+  select(id, type)
+vroom_write(pred, "NB_preds2.csv", delim = ",")
+```
+
+
+
+```{r}
+bart_model <- bart(trees=tune()) %>% 
+  set_engine("dbarts") %>% 
+  set_mode("classification") 
+
+bart_wf <- workflow() %>%
+  add_recipe(gggrecipe) %>%
+  add_model(bart_model)
+
+bart_tuneGrid <- grid_regular(trees())
+
+folds <- vfold_cv(gggTrain, v = 5, repeats=1)
+
+CV_Bart_results <- bart_wf %>% tune_grid(resamples = folds, 
+            grid = bart_tuneGrid, 
+            metrics = metric_set(accuracy))
+
+bestBartTune <- CV_Bart_results %>% 
+  select_best("accuracy") 
+
+final_bart_wf <- bart_wf %>%
+  finalize_workflow(bestBartTune) %>%
+  fit(gggTrain)
+
+pred_Bart <- predict(final_bart_wf, new_data = gggTest, type = "class") %>%
+  bind_cols(., gggTest) %>%
+  rename(type = .pred_class) %>%
+  select(id, type)
+
+vroom_write(pred_Bart, "GGGBartPreds.csv", delim = ",")
+
+```
+
+
+
+
+```{r}
+GGGnaivepreds <- read.csv('naiveBayes_klaR_2.csv')
+
+vroom_write(GGGnaivepreds, "GGGNaivePreds.csv", delim = ",")
+
+```
+
